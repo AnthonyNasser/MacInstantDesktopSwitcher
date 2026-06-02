@@ -21,6 +21,9 @@ A simple CLI is provided (`InstantSpaceSwitcher.app/Contents/MacOS/ISSCli --help
 brew install --cask jurplel/tap/instant-space-switcher
 ```
 
+After installation the app is located inside `/Applications/InstantSpaceSwitcher.app`
+
+
 ### Downloads
 
 Pre-built binaries are available through Github Releases [here](https://github.com/jurplel/InstantSpaceSwitcher/tags).
@@ -34,8 +37,10 @@ cd InstantSpaceSwitcher
 open ./build/InstantSpaceSwitcher.app
 ```
 
-### Troubleshooting
-If you encounter issues opening the app, such as:
+### Troubleshooting / First time startup
+
+When opening the app the first time you are likely to run into any of the following warnings:
+
 > "Apple could not verify InstantSpaceSwitcher.app is free of malware"
 
 > "App is damaged and can’t be opened"
