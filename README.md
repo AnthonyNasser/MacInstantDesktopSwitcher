@@ -34,13 +34,13 @@ After installation the app is located inside `/Applications/InstantSpaceSwitcher
 
 ### Downloads
 
-Pre-built binaries are available through Github Releases [here](https://github.com/AnthonyNasser/InstantDesktopSwitcher/tags).
+Pre-built binaries are available through Github Releases [here](https://github.com/AnthonyNasser/MacInstantDesktopSwitcher/tags).
 
 ### Build from source
 
 ```sh
-git clone https://github.com/AnthonyNasser/InstantDesktopSwitcher
-cd InstantDesktopSwitcher
+git clone https://github.com/AnthonyNasser/MacInstantDesktopSwitcher
+cd MacInstantDesktopSwitcher
 ./dist/build.sh
 open ./build/InstantSpaceSwitcher.app
 ```
