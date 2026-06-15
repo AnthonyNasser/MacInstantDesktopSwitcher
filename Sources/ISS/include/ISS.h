@@ -49,6 +49,22 @@ bool iss_get_space_info(ISSSpaceInfo *info);
 bool iss_get_menubar_space_info(ISSSpaceInfo *info);
 
 /**
+ * @brief Copies app-owned spaces for the display where the cursor is located.
+ *
+ * Returned array entries are CFDictionary values with keys:
+ * - index: zero-based user-visible space index
+ * - spaceCount: total user-visible spaces on the display
+ * - spaceID: CGS space id
+ * - displayID: UUID string of the display
+ * - ownerPID: best-effort owning app pid
+ * - ownerName: best-effort owning app/window owner name
+ * - isFullscreen: whether the space appears to be a fullscreen app space
+ *
+ * Caller owns the returned array and must CFRelease it.
+ */
+CFArrayRef iss_copy_cursor_display_app_spaces(void);
+
+/**
  * @brief Determines if a move in the given direction is allowed for the info.
  * @param info Space info snapshot.
  * @param direction Desired direction to move.

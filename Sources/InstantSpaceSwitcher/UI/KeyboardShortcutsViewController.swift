@@ -253,12 +253,11 @@ extension KeyboardShortcutsViewController: NSTableViewDelegate {
   private func handleRecordingResult(
     _ combination: HotkeyCombination, for identifier: HotkeyIdentifier
   ) {
-    let otherIdentifier: HotkeyIdentifier = identifier == .left ? .right : .left
-    if store.combination(for: otherIdentifier) == combination {
+    if let action = actionUsing(combination, excluding: identifier) {
       NSSound.beep()
       let alert = NSAlert()
       alert.messageText = "Shortcut already in use"
-      alert.informativeText = "This shortcut is already assigned to another action."
+      alert.informativeText = "This shortcut is already assigned to \(action)."
       alert.alertStyle = .warning
       alert.addButton(withTitle: "OK")
       alert.runModal()
@@ -266,5 +265,18 @@ extension KeyboardShortcutsViewController: NSTableViewDelegate {
     }
 
     store.update(combination, for: identifier)
+  }
+
+  private func actionUsing(
+    _ combination: HotkeyCombination, excluding excludedIdentifier: HotkeyIdentifier
+  ) -> String? {
+    for identifier in HotkeyIdentifier.allCases
+    where identifier != excludedIdentifier && store.isEnabled(identifier)
+      && store.combination(for: identifier) == combination
+    {
+      return identifier.displayName
+    }
+
+    return HotkeyConflictDetector.actionUsing(combination, excludingIdentifier: excludedIdentifier)
   }
 }

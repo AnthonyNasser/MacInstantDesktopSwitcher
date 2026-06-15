@@ -9,6 +9,14 @@ private func iss_is_expose_detected_in_window_list(_ windowList: CFArray) -> Boo
 
 @_silgen_name("iss_is_mission_control_detected_in_window_list")
 private func iss_is_mission_control_detected_in_window_list(_ windowList: CFArray) -> Bool
+
+@_silgen_name("iss_primary_owner_for_space_window_list")
+private func iss_primary_owner_for_space_window_list(
+    _ spaceDict: CFDictionary,
+    _ windowList: CFArray,
+    _ outPID: UnsafeMutablePointer<Int32>?,
+    _ outOwnerName: UnsafeMutablePointer<Unmanaged<CFString>?>?
+) -> Bool
 //
 // Window structures are hardcoded from real probe output (expose_probe.c) captured
 // on macOS Sequoia with two displays (1920x1080 primary, 1728x1117 secondary).
@@ -37,6 +45,21 @@ final class OverlayDetectionTests: XCTestCase {
         return [
             "kCGWindowOwnerName": "WindowServer",
             "kCGWindowLayer": NSNumber(value: layer)
+        ]
+    }
+
+    private func appWindow(id: Int, owner: String, pid: Int32) -> NSDictionary {
+        return [
+            "kCGWindowNumber": NSNumber(value: id),
+            "kCGWindowOwnerName": owner,
+            "kCGWindowOwnerPID": NSNumber(value: pid)
+        ]
+    }
+
+    private func spaceWithWindows(_ ids: [Int]) -> NSDictionary {
+        return [
+            "id64": NSNumber(value: 1234),
+            "windows": ids.map { NSNumber(value: $0) }
         ]
     }
 
@@ -234,5 +257,48 @@ final class OverlayDetectionTests: XCTestCase {
         ]
         XCTAssertTrue(iss_is_expose_detected_in_window_list(list as CFArray), "should detect App Exposé on single display")
         XCTAssertFalse(iss_is_mission_control_detected_in_window_list(list as CFArray))
+    }
+
+    // MARK: - App owner detection
+
+    func testPrimaryOwnerMatchesSpaceWindowID() {
+        let space = spaceWithWindows([42])
+        let list: NSArray = [
+            appWindow(id: 10, owner: "Finder", pid: 101),
+            appWindow(id: 42, owner: "Safari", pid: 202),
+        ]
+
+        var pid: Int32 = 0
+        var owner: Unmanaged<CFString>?
+        XCTAssertTrue(iss_primary_owner_for_space_window_list(space as CFDictionary, list as CFArray, &pid, &owner))
+        XCTAssertEqual(pid, 202)
+        XCTAssertEqual(owner?.takeRetainedValue() as String?, "Safari")
+    }
+
+    func testPrimaryOwnerIgnoresDockWindows() {
+        let space = spaceWithWindows([1, 2])
+        let list: NSArray = [
+            appWindow(id: 1, owner: "Dock", pid: 1),
+            appWindow(id: 2, owner: "Xcode", pid: 303),
+        ]
+
+        var pid: Int32 = 0
+        var owner: Unmanaged<CFString>?
+        XCTAssertTrue(iss_primary_owner_for_space_window_list(space as CFDictionary, list as CFArray, &pid, &owner))
+        XCTAssertEqual(pid, 303)
+        XCTAssertEqual(owner?.takeRetainedValue() as String?, "Xcode")
+    }
+
+    func testPrimaryOwnerReturnsFalseWithoutMatchingWindow() {
+        let space = spaceWithWindows([99])
+        let list: NSArray = [
+            appWindow(id: 1, owner: "Safari", pid: 202),
+        ]
+
+        var pid: Int32 = 0
+        var owner: Unmanaged<CFString>?
+        XCTAssertFalse(iss_primary_owner_for_space_window_list(space as CFDictionary, list as CFArray, &pid, &owner))
+        XCTAssertEqual(pid, 0)
+        XCTAssertNil(owner)
     }
 }

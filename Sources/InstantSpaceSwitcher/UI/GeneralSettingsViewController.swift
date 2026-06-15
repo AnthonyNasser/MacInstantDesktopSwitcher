@@ -12,7 +12,7 @@ final class GeneralSettingsViewController: NSViewController {
   private let showOSDInMissionControlCheckbox = NSButton(
     checkboxWithTitle: "Show on-screen display in Mission Control", target: nil, action: nil)
   private let swipeOverrideCheckbox = NSButton(
-    checkboxWithTitle: "Override swipe gesture", target: nil, action: nil)
+    checkboxWithTitle: "Override mouse/trackpad swipe gestures", target: nil, action: nil)
   private let animationSpeedPopup = NSPopUpButton()
   private let animationSpeedLabel = NSTextField(labelWithString: "Animation Speed:")
   private let launchAtLoginCheckbox = NSButton(
@@ -116,7 +116,8 @@ final class GeneralSettingsViewController: NSViewController {
     showOSDInMissionControlCheckbox.isEnabled = showOSD && overlayDetectionEnabled
     showOSDInMissionControlCheckbox.state = defaults.bool(forKey: "showOSDInMissionControl") ? .on : .off
 
-    swipeOverrideCheckbox.state = defaults.bool(forKey: "swipeOverride") ? .on : .off
+    let swipeOverrideEnabled = defaults.object(forKey: "swipeOverride") as? Bool ?? true
+    swipeOverrideCheckbox.state = swipeOverrideEnabled ? .on : .off
 
     let animationSpeedValue = defaults.double(forKey: "gestureSpeed")
     if animationSpeedValue > 0 {

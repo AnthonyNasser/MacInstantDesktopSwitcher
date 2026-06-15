@@ -19,6 +19,9 @@ static const CGEventField kCGEventGestureSwipeVelocityX = (CGEventField)129;
 static const CGEventField kCGEventGestureSwipeVelocityY = (CGEventField)130;
 static const CGEventField kCGEventGesturePhase = (CGEventField)132;
 
+static const int64_t kVKLeftArrow = 123;
+static const int64_t kVKRightArrow = 124;
+
 // See IOHIDEventType enum in IOHIDFamily
 static const uint32_t kIOHIDEventTypeDockSwipe = 23;
 
@@ -63,6 +66,7 @@ static bool overlayDetectionEnabled = false;
 static bool swipeOverrideEnabled = false;
 static bool swipeTracking = false;
 static bool swipeFired = false;
+static bool suppressSwitchShortcutKeyUp = false;
 
 // Gesture speed state
 static double gestureSpeed = 2000.0;
@@ -100,6 +104,9 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
                                             bool hasActiveSpace,
                                             ISSSpaceInfo *outInfo);
+static CFDictionaryRef copy_target_display(bool useCursorDisplay,
+                                           CGSSpaceID *activeSpace,
+                                           bool *hasActiveSpace);
 static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay);
 static bool iss_perform_switch_gesture(ISSDirection direction, double velocity);
 static bool iss_switch_with_info(const ISSSpaceInfo *info, ISSDirection direction);
@@ -124,6 +131,28 @@ static void swipe_override_switch(ISSDirection dir) {
     }
 }
 
+static bool is_control_space_switch_shortcut(CGEventRef event, ISSDirection *outDirection) {
+    if (!event || !outDirection) return false;
+
+    int64_t keyCode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+    if (keyCode != kVKLeftArrow && keyCode != kVKRightArrow) {
+        return false;
+    }
+
+    CGEventFlags flags = CGEventGetFlags(event);
+    const CGEventFlags required = kCGEventFlagMaskControl;
+    const CGEventFlags disallowed = kCGEventFlagMaskAlternate |
+                                    kCGEventFlagMaskCommand |
+                                    kCGEventFlagMaskShift;
+
+    if ((flags & required) == 0 || (flags & disallowed) != 0) {
+        return false;
+    }
+
+    *outDirection = keyCode == kVKLeftArrow ? ISSDirectionLeft : ISSDirectionRight;
+    return true;
+}
+
 static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
                                    CGEventRef event, void *refcon) {
     (void)proxy;
@@ -137,24 +166,47 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
     if (!swipeOverrideEnabled) return event;
 
+    if (type == kCGEventKeyDown) {
+        ISSDirection direction;
+        if (is_control_space_switch_shortcut(event, &direction)) {
+            suppressSwitchShortcutKeyUp = true;
+            swipe_override_switch(direction);
+            return NULL;
+        }
+    }
+
+    if (type == kCGEventKeyUp && suppressSwitchShortcutKeyUp) {
+        ISSDirection direction;
+        if (is_control_space_switch_shortcut(event, &direction)) {
+            suppressSwitchShortcutKeyUp = false;
+            return NULL;
+        }
+        suppressSwitchShortcutKeyUp = false;
+    }
+
     CGSEventType eventType =
         (CGSEventType)CGEventGetIntegerValueField(event, kCGSEventTypeField);
 
-    // Pass through synthetic events (non-HID source). Real gesture events
-    // from the trackpad have sourcePid == 0 (HID kernel).
+    // Pass through synthetic events (non-HID source). Real Dock swipe events
+    // from the trackpad have sourcePid == 0 (HID kernel). Magic Mouse fluid
+    // touch gestures may have a nonzero source pid, so handle those below.
     if (eventType == kCGSEventDockControl || eventType == kCGSEventGesture) {
         pid_t sourcePid = (pid_t)CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID);
         if (sourcePid != 0) return event;
     }
 
-    if (eventType == kCGSEventDockControl) {
-        uint32_t hidType =
-            (uint32_t)CGEventGetIntegerValueField(event, kCGEventGestureHIDType);
-        if (hidType != kIOHIDEventTypeDockSwipe) return event;
+    if (eventType == kCGSEventDockControl || eventType == kCGSEventFluidTouchGesture) {
+        if (eventType == kCGSEventDockControl) {
+            uint32_t hidType =
+                (uint32_t)CGEventGetIntegerValueField(event, kCGEventGestureHIDType);
+            if (hidType != kIOHIDEventTypeDockSwipe) return event;
+        }
 
-        uint16_t motion =
-            (uint16_t)CGEventGetIntegerValueField(event, kCGEventGestureSwipeMotion);
-        if (motion != kCGGestureMotionHorizontal) return event;
+        if (eventType == kCGSEventDockControl) {
+            uint16_t motion =
+                (uint16_t)CGEventGetIntegerValueField(event, kCGEventGestureSwipeMotion);
+            if (motion != kCGGestureMotionHorizontal) return event;
+        }
 
         CGSGesturePhase phase =
             (CGSGesturePhase)CGEventGetIntegerValueField(event, kCGEventGesturePhase);
@@ -209,7 +261,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
     }
 
     // Suppress companion gesture events during active swipe tracking
-    if (eventType == kCGSEventGesture && swipeTracking) {
+    if ((eventType == kCGSEventGesture || eventType == kCGSEventFluidTouchGesture) && swipeTracking) {
         return NULL;
     }
 
@@ -294,28 +346,37 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
     return true;
 }
 
-static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay) {
+static CFDictionaryRef copy_target_display(bool useCursorDisplay,
+                                           CGSSpaceID *activeSpace,
+                                           bool *hasActiveSpace) {
     if (!cgs_symbols_available()) {
         fprintf(stderr, "ISS: required CGS symbols missing\n");
-        return false;
+        return NULL;
     }
 
     CGSConnectionID connection = CGSMainConnectionID();
     if (connection == 0) {
         fprintf(stderr, "ISS: CGSMainConnectionID returned 0\n");
-        return false;
+        return NULL;
     }
 
-    CGSSpaceID activeSpace = 0;
-    bool hasActiveSpace = false;
+    CGSSpaceID localActiveSpace = 0;
+    bool localHasActiveSpace = false;
     if (&CGSGetActiveSpace != NULL) {
-        activeSpace = CGSGetActiveSpace(connection);
-        if (activeSpace != 0) {
-            hasActiveSpace = true;
+        localActiveSpace = CGSGetActiveSpace(connection);
+        if (localActiveSpace != 0) {
+            localHasActiveSpace = true;
         } else {
             fprintf(stderr, "ISS: CGSGetActiveSpace returned 0\n");
-            return false;
+            return NULL;
         }
+    }
+
+    if (activeSpace) {
+        *activeSpace = localActiveSpace;
+    }
+    if (hasActiveSpace) {
+        *hasActiveSpace = localHasActiveSpace;
     }
 
     // Get display identifier based on mode
@@ -352,7 +413,7 @@ static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDispla
         if (activeDisplayIdentifier) {
             CFRelease(activeDisplayIdentifier);
         }
-        return false;
+        return NULL;
     }
 
     const CFIndex displayCount = CFArrayGetCount(displays);
@@ -385,17 +446,377 @@ static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDispla
         targetDisplay = fallbackDisplay;
     }
 
-    bool success = false;
-    if (targetDisplay) {
-        success = extract_space_info_from_display(targetDisplay, activeSpace, hasActiveSpace, info);
-    }
+    CFDictionaryRef copiedDisplay = targetDisplay ? CFRetain(targetDisplay) : NULL;
 
     if (activeDisplayIdentifier) {
         CFRelease(activeDisplayIdentifier);
     }
     CFRelease(displays);
 
+    return copiedDisplay;
+}
+
+static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay) {
+    CGSSpaceID activeSpace = 0;
+    bool hasActiveSpace = false;
+    CFDictionaryRef targetDisplay = copy_target_display(useCursorDisplay, &activeSpace, &hasActiveSpace);
+    if (!targetDisplay) {
+        return false;
+    }
+
+    bool success = extract_space_info_from_display(targetDisplay, activeSpace, hasActiveSpace, info);
+    CFRelease(targetDisplay);
     return success;
+}
+
+static bool space_dict_has_window_id(CFDictionaryRef spaceDict, int windowID) {
+    if (!spaceDict) return false;
+
+    const CFStringRef keys[] = {
+        CFSTR("windows"),
+        CFSTR("Windows"),
+        CFSTR("Window IDs"),
+        CFSTR("ManagedSpaceWindows")
+    };
+
+    for (size_t keyIndex = 0; keyIndex < sizeof(keys) / sizeof(keys[0]); keyIndex++) {
+        const void *value = CFDictionaryGetValue(spaceDict, keys[keyIndex]);
+        if (!value || CFGetTypeID(value) != CFArrayGetTypeID()) {
+            continue;
+        }
+
+        CFArrayRef windows = (CFArrayRef)value;
+        CFIndex count = CFArrayGetCount(windows);
+        for (CFIndex i = 0; i < count; i++) {
+            const void *windowValue = CFArrayGetValueAtIndex(windows, i);
+            if (!windowValue || CFGetTypeID(windowValue) != CFNumberGetTypeID()) {
+                continue;
+            }
+
+            int candidate = 0;
+            if (CFNumberGetValue((CFNumberRef)windowValue, kCFNumberIntType, &candidate) && candidate == windowID) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool owner_is_ignored(CFStringRef owner) {
+    if (!owner) return true;
+    return CFEqual(owner, CFSTR("Dock")) ||
+           CFEqual(owner, CFSTR("WindowServer")) ||
+           CFEqual(owner, CFSTR("SystemUIServer")) ||
+           CFEqual(owner, CFSTR("Control Center")) ||
+           CFEqual(owner, CFSTR("NotificationCenter"));
+}
+
+static CFStringRef copy_owner_name_for_pid(CFArrayRef windowList, int pid) {
+    if (!windowList || pid <= 0) return NULL;
+
+    CFIndex count = CFArrayGetCount(windowList);
+    for (CFIndex i = 0; i < count; i++) {
+        const void *windowValue = CFArrayGetValueAtIndex(windowList, i);
+        if (!windowValue || CFGetTypeID(windowValue) != CFDictionaryGetTypeID()) {
+            continue;
+        }
+
+        CFDictionaryRef windowInfo = (CFDictionaryRef)windowValue;
+        CFNumberRef pidNumber = (CFNumberRef)CFDictionaryGetValue(windowInfo, CFSTR("kCGWindowOwnerPID"));
+        int candidatePID = 0;
+        if (!pidNumber || CFGetTypeID(pidNumber) != CFNumberGetTypeID() ||
+            !CFNumberGetValue(pidNumber, kCFNumberIntType, &candidatePID) ||
+            candidatePID != pid) {
+            continue;
+        }
+
+        CFStringRef owner = (CFStringRef)CFDictionaryGetValue(windowInfo, CFSTR("kCGWindowOwnerName"));
+        if (!owner || CFGetTypeID(owner) != CFStringGetTypeID() || owner_is_ignored(owner)) {
+            continue;
+        }
+
+        return CFRetain(owner);
+    }
+
+    char fallback[64];
+    snprintf(fallback, sizeof(fallback), "PID %d", pid);
+    return CFStringCreateWithCString(NULL, fallback, kCFStringEncodingUTF8);
+}
+
+bool iss_primary_owner_for_space_window_list(CFDictionaryRef spaceDict,
+                                             CFArrayRef windowList,
+                                             int *outPID,
+                                             CFStringRef *outOwnerName) {
+    if (outPID) *outPID = 0;
+    if (outOwnerName) *outOwnerName = NULL;
+    if (!spaceDict || !windowList) return false;
+
+    CFIndex count = CFArrayGetCount(windowList);
+    for (CFIndex i = 0; i < count; i++) {
+        const void *windowValue = CFArrayGetValueAtIndex(windowList, i);
+        if (!windowValue || CFGetTypeID(windowValue) != CFDictionaryGetTypeID()) {
+            continue;
+        }
+
+        CFDictionaryRef windowInfo = (CFDictionaryRef)windowValue;
+        CFNumberRef windowNumber = (CFNumberRef)CFDictionaryGetValue(windowInfo, CFSTR("kCGWindowNumber"));
+        if (!windowNumber || CFGetTypeID(windowNumber) != CFNumberGetTypeID()) {
+            continue;
+        }
+
+        int windowID = 0;
+        if (!CFNumberGetValue(windowNumber, kCFNumberIntType, &windowID) ||
+            !space_dict_has_window_id(spaceDict, windowID)) {
+            continue;
+        }
+
+        CFStringRef owner = (CFStringRef)CFDictionaryGetValue(windowInfo, CFSTR("kCGWindowOwnerName"));
+        if (!owner || CFGetTypeID(owner) != CFStringGetTypeID() || owner_is_ignored(owner)) {
+            continue;
+        }
+
+        int pid = 0;
+        CFNumberRef pidNumber = (CFNumberRef)CFDictionaryGetValue(windowInfo, CFSTR("kCGWindowOwnerPID"));
+        if (pidNumber && CFGetTypeID(pidNumber) == CFNumberGetTypeID()) {
+            CFNumberGetValue(pidNumber, kCFNumberIntType, &pid);
+        }
+
+        if (outPID) *outPID = pid;
+        if (outOwnerName) *outOwnerName = CFRetain(owner);
+        return true;
+    }
+
+    return false;
+}
+
+static void append_pid_if_missing(CFMutableArrayRef pids, int pid) {
+    if (!pids || pid <= 0) return;
+
+    CFIndex count = CFArrayGetCount(pids);
+    for (CFIndex i = 0; i < count; i++) {
+        CFNumberRef number = (CFNumberRef)CFArrayGetValueAtIndex(pids, i);
+        int candidate = 0;
+        if (number && CFGetTypeID(number) == CFNumberGetTypeID() &&
+            CFNumberGetValue(number, kCFNumberIntType, &candidate) &&
+            candidate == pid) {
+            return;
+        }
+    }
+
+    CFNumberRef number = CFNumberCreate(NULL, kCFNumberIntType, &pid);
+    CFArrayAppendValue(pids, number);
+    CFRelease(number);
+}
+
+static void append_pids_from_value(CFMutableArrayRef pids, const void *value) {
+    if (!pids || !value) return;
+
+    if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+        int pid = 0;
+        if (CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &pid)) {
+            append_pid_if_missing(pids, pid);
+        }
+        return;
+    }
+
+    if (CFGetTypeID(value) == CFArrayGetTypeID()) {
+        CFArrayRef array = (CFArrayRef)value;
+        CFIndex count = CFArrayGetCount(array);
+        for (CFIndex i = 0; i < count; i++) {
+            append_pids_from_value(pids, CFArrayGetValueAtIndex(array, i));
+        }
+    }
+}
+
+static CFArrayRef copy_pids_for_space(CFDictionaryRef spaceDict) {
+    if (!spaceDict) return NULL;
+
+    CFMutableArrayRef pids = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    append_pids_from_value(pids, CFDictionaryGetValue(spaceDict, CFSTR("pid")));
+
+    const void *layoutValue = CFDictionaryGetValue(spaceDict, CFSTR("TileLayoutManager"));
+    if (layoutValue && CFGetTypeID(layoutValue) == CFDictionaryGetTypeID()) {
+        CFDictionaryRef layout = (CFDictionaryRef)layoutValue;
+        const void *tileSpacesValue = CFDictionaryGetValue(layout, CFSTR("TileSpaces"));
+        if (tileSpacesValue && CFGetTypeID(tileSpacesValue) == CFArrayGetTypeID()) {
+            CFArrayRef tileSpaces = (CFArrayRef)tileSpacesValue;
+            CFIndex count = CFArrayGetCount(tileSpaces);
+            for (CFIndex i = 0; i < count; i++) {
+                const void *tileValue = CFArrayGetValueAtIndex(tileSpaces, i);
+                if (tileValue && CFGetTypeID(tileValue) == CFDictionaryGetTypeID()) {
+                    append_pids_from_value(pids, CFDictionaryGetValue((CFDictionaryRef)tileValue, CFSTR("pid")));
+                }
+            }
+        }
+    }
+
+    if (CFArrayGetCount(pids) == 0) {
+        CFRelease(pids);
+        return NULL;
+    }
+
+    return pids;
+}
+
+static bool space_dict_is_fullscreen(CFDictionaryRef spaceDict) {
+    if (!spaceDict) return false;
+
+    CFNumberRef typeNumber = (CFNumberRef)CFDictionaryGetValue(spaceDict, CFSTR("type"));
+    int type = 0;
+    if (typeNumber && CFGetTypeID(typeNumber) == CFNumberGetTypeID() &&
+        CFNumberGetValue(typeNumber, kCFNumberIntType, &type) &&
+        type == 4) {
+        return true;
+    }
+
+    const void *layoutValue = CFDictionaryGetValue(spaceDict, CFSTR("TileLayoutManager"));
+    if (layoutValue && CFGetTypeID(layoutValue) == CFDictionaryGetTypeID()) {
+        return true;
+    }
+
+    const CFStringRef stringKeys[] = { CFSTR("type"), CFSTR("Type"), CFSTR("name"), CFSTR("Name") };
+    for (size_t i = 0; i < sizeof(stringKeys) / sizeof(stringKeys[0]); i++) {
+        const void *value = CFDictionaryGetValue(spaceDict, stringKeys[i]);
+        if (value && CFGetTypeID(value) == CFStringGetTypeID()) {
+            CFStringRef stringValue = (CFStringRef)value;
+            if (CFStringFind(stringValue, CFSTR("Fullscreen"), kCFCompareCaseInsensitive).location != kCFNotFound ||
+                CFStringFind(stringValue, CFSTR("Full Screen"), kCFCompareCaseInsensitive).location != kCFNotFound) {
+                return true;
+            }
+        }
+    }
+
+    const CFStringRef boolKeys[] = { CFSTR("isFullscreen"), CFSTR("Is Fullscreen"), CFSTR("fullscreen") };
+    for (size_t i = 0; i < sizeof(boolKeys) / sizeof(boolKeys[0]); i++) {
+        const void *value = CFDictionaryGetValue(spaceDict, boolKeys[i]);
+        if (value && CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)value)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+CFArrayRef iss_copy_cursor_display_app_spaces(void) {
+    CGSSpaceID activeSpace = 0;
+    bool hasActiveSpace = false;
+    CFDictionaryRef displayDict = copy_target_display(true, &activeSpace, &hasActiveSpace);
+    if (!displayDict) {
+        return NULL;
+    }
+
+    const void *spacesValue = CFDictionaryGetValue(displayDict, CFSTR("Spaces"));
+    if (!spacesValue || CFGetTypeID(spacesValue) != CFArrayGetTypeID()) {
+        CFRelease(displayDict);
+        return NULL;
+    }
+
+    CFStringRef displayID = (CFStringRef)CFDictionaryGetValue(displayDict, CFSTR("Display Identifier"));
+    if (displayID && CFGetTypeID(displayID) != CFStringGetTypeID()) {
+        displayID = NULL;
+    }
+
+    CFArrayRef windowList = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    if (!windowList) {
+        CFRelease(displayDict);
+        return NULL;
+    }
+
+    CFArrayRef spaces = (CFArrayRef)spacesValue;
+    CFIndex rawSpaceCount = CFArrayGetCount(spaces);
+    unsigned int userVisibleCount = 0;
+    for (CFIndex i = 0; i < rawSpaceCount; i++) {
+        const void *spaceValue = CFArrayGetValueAtIndex(spaces, i);
+        if (!spaceValue || CFGetTypeID(spaceValue) != CFDictionaryGetTypeID()) {
+            continue;
+        }
+        CFDictionaryRef spaceDict = (CFDictionaryRef)spaceValue;
+        CFNumberRef idNumber = (CFNumberRef)CFDictionaryGetValue(spaceDict, CFSTR("id64"));
+        if (idNumber && CFGetTypeID(idNumber) == CFNumberGetTypeID()) {
+            userVisibleCount++;
+        }
+    }
+
+    CFMutableArrayRef result = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    unsigned int index = 0;
+    for (CFIndex i = 0; i < rawSpaceCount; i++) {
+        const void *spaceValue = CFArrayGetValueAtIndex(spaces, i);
+        if (!spaceValue || CFGetTypeID(spaceValue) != CFDictionaryGetTypeID()) {
+            continue;
+        }
+
+        CFDictionaryRef spaceDict = (CFDictionaryRef)spaceValue;
+        CFNumberRef idNumber = (CFNumberRef)CFDictionaryGetValue(spaceDict, CFSTR("id64"));
+        if (!idNumber || CFGetTypeID(idNumber) != CFNumberGetTypeID()) {
+            continue;
+        }
+
+        CGSSpaceID spaceID = 0;
+        if (!CFNumberGetValue(idNumber, kCFNumberSInt64Type, &spaceID)) {
+            index++;
+            continue;
+        }
+
+        CFArrayRef pids = copy_pids_for_space(spaceDict);
+        if (!pids) {
+            index++;
+            continue;
+        }
+
+        CFStringRef ownerName = NULL;
+        bool isFullscreen = space_dict_is_fullscreen(spaceDict);
+
+        CFIndex pidCount = CFArrayGetCount(pids);
+        for (CFIndex pidIndex = 0; pidIndex < pidCount; pidIndex++) {
+            CFNumberRef pidValue = (CFNumberRef)CFArrayGetValueAtIndex(pids, pidIndex);
+            if (!pidValue || CFGetTypeID(pidValue) != CFNumberGetTypeID()) {
+                continue;
+            }
+
+            int ownerPID = 0;
+            if (!CFNumberGetValue(pidValue, kCFNumberIntType, &ownerPID) || ownerPID <= 0) {
+                continue;
+            }
+
+            ownerName = copy_owner_name_for_pid(windowList, ownerPID);
+            if (!ownerName) {
+                continue;
+            }
+
+            CFMutableDictionaryRef item = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            CFNumberRef indexNumber = CFNumberCreate(NULL, kCFNumberIntType, &index);
+            CFNumberRef countNumber = CFNumberCreate(NULL, kCFNumberIntType, &userVisibleCount);
+            CFNumberRef spaceIDNumber = CFNumberCreate(NULL, kCFNumberSInt64Type, &spaceID);
+            CFNumberRef ownerPIDNumber = CFNumberCreate(NULL, kCFNumberIntType, &ownerPID);
+
+            CFDictionarySetValue(item, CFSTR("index"), indexNumber);
+            CFDictionarySetValue(item, CFSTR("spaceCount"), countNumber);
+            CFDictionarySetValue(item, CFSTR("spaceID"), spaceIDNumber);
+            CFDictionarySetValue(item, CFSTR("ownerPID"), ownerPIDNumber);
+            CFDictionarySetValue(item, CFSTR("ownerName"), ownerName);
+            CFDictionarySetValue(item, CFSTR("isFullscreen"), isFullscreen ? kCFBooleanTrue : kCFBooleanFalse);
+            if (displayID) {
+                CFDictionarySetValue(item, CFSTR("displayID"), displayID);
+            }
+
+            CFArrayAppendValue(result, item);
+
+            CFRelease(indexNumber);
+            CFRelease(countNumber);
+            CFRelease(spaceIDNumber);
+            CFRelease(ownerPIDNumber);
+            CFRelease(ownerName);
+            CFRelease(item);
+        }
+
+        CFRelease(pids);
+        index++;
+    }
+
+    CFRelease(windowList);
+    CFRelease(displayDict);
+    return result;
 }
 
 static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direction) {
@@ -540,7 +961,8 @@ bool iss_init(void) {
     }
 
     CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp)
-        | (1ULL << kCGSEventGesture) | (1ULL << kCGSEventDockControl);
+        | (1ULL << kCGSEventGesture) | (1ULL << kCGSEventDockControl)
+        | (1ULL << kCGSEventFluidTouchGesture);
     globalTap = CGEventTapCreate(
         kCGSessionEventTap,
         kCGHeadInsertEventTap,
@@ -667,6 +1089,7 @@ void iss_set_swipe_override(bool enabled) {
     if (!enabled) {
         swipeTracking = false;
         swipeFired = false;
+        suppressSwitchShortcutKeyUp = false;
     }
 }
 

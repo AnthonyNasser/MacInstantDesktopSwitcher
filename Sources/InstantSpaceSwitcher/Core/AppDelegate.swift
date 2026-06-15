@@ -7,12 +7,14 @@ import ISS
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private let menuBarController = MenuBarController()
   private let hotkeyStore = HotkeyStore.shared
+  private let appHotkeyStore = AppSpaceHotkeyStore.shared
   private lazy var preferencesWindowController = PreferencesWindowController()
   private var currentSpaceIndex: UInt32?
   private var lastSpaceIndex: UInt32?
   private var cancellables = Set<AnyCancellable>()
   private var spaceChangeObserver: Any?
   private var appActivationObserver: Any?
+  private var appHotkeyRegistrationKeys = Set<String>()
 
   func applicationWillFinishLaunching(_ notification: Notification) {
     NSAppleEventManager.shared().setEventHandler(
@@ -35,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       retryIssInit()
     }
 
-    if UserDefaults.standard.bool(forKey: "swipeOverride") {
+    if UserDefaults.standard.object(forKey: "swipeOverride") as? Bool ?? true {
       iss_set_swipe_override(true)
     }
 
@@ -58,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     menuBarController.delegate = self
     menuBarController.setup()
     bindHotkeys()
+    bindAppHotkeys()
     observeSpaceChanges()
     observeAppActivation()
     refreshSpaceInfo()
@@ -234,6 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       menuBarController.applyHotkey(combination, to: identifier)
       registerHotkey(for: identifier, combination: combination)
     }
+    registerAppHotkeys()
   }
 
   private func registerHotkey(for identifier: HotkeyIdentifier, combination: HotkeyCombination) {
@@ -275,6 +279,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.performSpaceLastSpace()
       }
     }
+  }
+
+  private func bindAppHotkeys() {
+    appHotkeyStore.$mappings.receive(on: RunLoop.main).sink { [weak self] _ in
+      self?.registerAppHotkeys()
+    }.store(in: &cancellables)
+  }
+
+  private func registerAppHotkeys() {
+    for key in appHotkeyRegistrationKeys {
+      HotKeyManager.shared.unregister(key: key)
+    }
+    appHotkeyRegistrationKeys.removeAll()
+
+    for mapping in appHotkeyStore.mappings {
+      guard mapping.isEnabled, let hotkey = mapping.hotkey else { continue }
+      HotKeyManager.shared.register(key: mapping.registrationKey, combination: hotkey) { [weak self] in
+        self?.performAppSpaceSwitch(mapping)
+      }
+      appHotkeyRegistrationKeys.insert(mapping.registrationKey)
+    }
+  }
+
+  private func performAppSpaceSwitch(_ mapping: AppSpaceHotkeyMapping) {
+    guard let index = AppSpaceResolver.resolveTargetIndex(for: mapping) else {
+      NSSound.beep()
+      return
+    }
+
+    performSpaceSwitchToIndex(index)
   }
 
   private func performSpaceSwitch(_ direction: ISSDirection) {

@@ -10,7 +10,7 @@ class HotKeyManager {
   }
 
   private var handlers: [UInt32: () -> Void] = [:]
-  private var registrations: [HotkeyIdentifier: Registration] = [:]
+  private var registrations: [String: Registration] = [:]
   private var currentId: UInt32 = 1
 
   private init() {
@@ -20,7 +20,13 @@ class HotKeyManager {
   func register(
     identifier: HotkeyIdentifier, combination: HotkeyCombination, handler: @escaping () -> Void
   ) {
-    unregister(identifier: identifier)
+    register(key: identifier.rawValue, combination: combination, handler: handler)
+  }
+
+  func register(
+    key: String, combination: HotkeyCombination, handler: @escaping () -> Void
+  ) {
+    unregister(key: key)
 
     let id = currentId
     currentId &+= 1
@@ -32,16 +38,20 @@ class HotKeyManager {
       &hotKeyRef)
 
     guard status == noErr else {
-      print("Failed to register hotkey for \(identifier) status=\(status)")
+      print("Failed to register hotkey for \(key) status=\(status)")
       return
     }
 
     handlers[id] = handler
-    registrations[identifier] = Registration(id: id, reference: hotKeyRef)
+    registrations[key] = Registration(id: id, reference: hotKeyRef)
   }
 
   func unregister(identifier: HotkeyIdentifier) {
-    guard let registration = registrations.removeValue(forKey: identifier) else { return }
+    unregister(key: identifier.rawValue)
+  }
+
+  func unregister(key: String) {
+    guard let registration = registrations.removeValue(forKey: key) else { return }
     handlers.removeValue(forKey: registration.id)
     if let reference = registration.reference {
       UnregisterEventHotKey(reference)
