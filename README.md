@@ -26,7 +26,7 @@ A simple CLI is provided (`InstantSpaceSwitcher.app/Contents/MacOS/ISSCli --help
 ### Homebrew
 
 ```sh
-brew install --cask jurplel/tap/instant-space-switcher
+brew install --cask AnthonyNasser/tap/mac-instant-desktop-switcher
 ```
 
 After installation the app is located inside `/Applications/InstantSpaceSwitcher.app`
