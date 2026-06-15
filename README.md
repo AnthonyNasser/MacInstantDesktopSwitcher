@@ -10,6 +10,14 @@ https://github.com/user-attachments/assets/037422c9-3fb7-41cd-8da7-58d28c4c8eff
 - Uses native macOS spaces
 - Free
 
+## What this adds to InstantSpaceSwitcher
+
+This fork keeps InstantSpaceSwitcher’s native no-animation Spaces switching and adds:
+
+- Instant switching for Logitech Options/Options+ desktop swipe actions
+- Hotkeys that follow fullscreen app Spaces instead of fixed Space numbers
+- A settings tab for mapping detected fullscreen apps to custom shortcuts
+
 A simple CLI is provided (`InstantSpaceSwitcher.app/Contents/MacOS/ISSCli --help`)
 
 
@@ -26,13 +34,13 @@ After installation the app is located inside `/Applications/InstantSpaceSwitcher
 
 ### Downloads
 
-Pre-built binaries are available through Github Releases [here](https://github.com/jurplel/InstantSpaceSwitcher/tags).
+Pre-built binaries are available through Github Releases [here](https://github.com/AnthonyNasser/InstantDesktopSwitcher/tags).
 
 ### Build from source
 
 ```sh
-git clone https://github.com/jurplel/InstantSpaceSwitcher
-cd InstantSpaceSwitcher
+git clone https://github.com/AnthonyNasser/InstantDesktopSwitcher
+cd InstantDesktopSwitcher
 ./dist/build.sh
 open ./build/InstantSpaceSwitcher.app
 ```
@@ -62,4 +70,3 @@ If you work at Apple, and your team owns the space switching animation, please f
 
 [^1]: This happens because the app is not signed, which requires a costly Apple Developer account
 [^2]: And I know for a fact there is a rdar for this
-
